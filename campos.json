@@ -1,0 +1,6 @@
+{
+  "cnpj_emitente": "CNPJ de quem emitiu o documento, formato 00.000.000/0000-00",
+  "numero_documento": "Número do documento ou da nota",
+  "data_emissao": "Data de emissão no formato DD/MM/AAAA",
+  "valor_total": "Valor total do documento, ex.: 1.234,56"
+}
