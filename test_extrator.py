@@ -30,8 +30,9 @@ class TestExtrator(unittest.TestCase):
 
         def fake_post(url, json, timeout):
             if "images" in json:
-                return resposta("CNPJ 12.345.678/0001-90")
+                return resposta("text[[48, 244, 114, 259]]\nCNPJ 12.345.678/0001-90")
             self.assertIn("cnpj", json["format"]["properties"])
+            self.assertNotIn("[[", json["prompt"])
             return resposta('{"cnpj": "12.345.678/0001-90", "valor": null}')
 
         with mock.patch.object(extrator.requests, "post", side_effect=fake_post):
@@ -44,6 +45,17 @@ class TestExtrator(unittest.TestCase):
         self.assertIsNone(ok["erro"])
         ruim = json.loads((self.saida / "quebrado.json").read_text(encoding="utf-8"))
         self.assertIsNotNone(ruim["erro"])
+
+    def test_paginas_selecionadas(self):
+        doc = pymupdf.open()
+        for i in range(1, 5):
+            doc.new_page().insert_text((72, 72), f"pagina {i}")
+        pdf = self.tmp / "multi.pdf"
+        doc.save(pdf)
+        with mock.patch.object(extrator.requests, "post", return_value=resposta("x")) as post:
+            textos = extrator.ocr_pdf(pdf, "http://x", "ocr", [1, 3, 9])  # 9 não existe
+        self.assertEqual(len(textos), 2)
+        self.assertEqual(post.call_count, 2)
 
 
 if __name__ == "__main__":
