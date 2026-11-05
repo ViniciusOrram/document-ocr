@@ -1,6 +1,7 @@
 """Extrai campos configuráveis de PDFs e grava um JSON por PDF.
 
-PDF -> markdown com o MarkItDown -> campos extraídos por um modelo gemma3 no Ollama.
+PDF -> campos por regras (regras.py, modelo fixo de contrato); os que as regras não acharem
+são extraídos do markdown (MarkItDown) por um LLM no Ollama.
 """
 import io
 import json
@@ -13,6 +14,8 @@ import pymupdf
 import requests
 from dotenv import load_dotenv
 from markitdown import MarkItDown
+
+import regras
 
 TIMEOUT = 1800  # extração de ~76 campos em CPU leva 5-7 min com o gemma3:4b
 MIN_CARACTERES_POR_PAGINA = 50  # abaixo disso o PDF não tem camada de texto (digitalizado)
@@ -28,14 +31,27 @@ def ollama(host, model, prompt, fmt=None):
     return r.json()
 
 
-def markdown_pdf(pdf, paginas=None):
-    """Converte as páginas pedidas (1-based; None = todas) em markdown com o MarkItDown. Retorna (markdown, nº de páginas)."""
+def ler_pdf(pdf, paginas=None):
+    """Lê as páginas pedidas (1-based; None = todas).
+
+    Retorna (markdown do MarkItDown, nº de páginas, tipo da ficha, campos achados pelas regras).
+    """
     with pymupdf.open(pdf) as src, pymupdf.open() as sub:
         for i in paginas or range(1, len(src) + 1):
             if 1 <= i <= len(src):
                 sub.insert_pdf(src, from_page=i - 1, to_page=i - 1)
-        n, dados = len(sub), sub.tobytes()
-    return MarkItDown().convert_stream(io.BytesIO(dados), file_extension=".pdf").text_content, n
+        n, dados, (tipo, achados) = len(sub), sub.tobytes(), regras.extrair(sub)
+    return MarkItDown().convert_stream(io.BytesIO(dados), file_extension=".pdf").text_content, n, tipo, achados
+
+
+def campos_do_tipo(grupos, tipo):
+    """Junta os grupos do campos.json que valem para o tipo: os comuns + a ficha do tipo (tipo None = todos)."""
+    fichas = {t for t, _ in regras.FICHAS.values()}
+    campos = {}
+    for grupo, cs in grupos.items():
+        if grupo not in fichas or tipo is None or grupo == tipo:
+            campos.update(cs)
+    return campos
 
 
 def extrair_campos(texto, campos, host, model):
@@ -56,20 +72,27 @@ def extrair_campos(texto, campos, host, model):
     return {k: resultado.get(k) for k in campos}, r.get("prompt_eval_count")
 
 
-def processar(entrada, saida, campos, host, model, paginas=None):
+def processar(entrada, saida, grupos, host, model, paginas=None):
+    """grupos: campos.json ({grupo: {campo: descrição}}); grupos com nome de tipo de ficha só valem para esse tipo."""
     saida.mkdir(parents=True, exist_ok=True)
     pdfs = sorted(p for p in entrada.iterdir() if p.suffix.lower() == ".pdf")
     if not pdfs:
         print(f"Nenhum PDF encontrado em {entrada}")
     for pdf in pdfs:
         print(f"Processando {pdf.name}")
-        resultado = {"arquivo": pdf.name, "paginas": 0, "campos": None, "tokens_extracao": None, "markdown": None, "erro": None}
+        resultado = {"arquivo": pdf.name, "tipo": None, "paginas": 0, "campos": None, "campos_via_llm": None, "tokens_extracao": None, "markdown": None, "erro": None}
         try:
-            texto, n = markdown_pdf(pdf, paginas)
-            resultado["paginas"], resultado["markdown"] = n, texto
+            texto, n, tipo, achados = ler_pdf(pdf, paginas)
+            resultado["tipo"], resultado["paginas"], resultado["markdown"] = tipo, n, texto
             if len(re.sub(r"\s", "", texto)) < MIN_CARACTERES_POR_PAGINA * max(n, 1):
                 raise ValueError("PDF sem texto digital (provavelmente digitalizado); o MarkItDown não faz OCR")
-            resultado["campos"], resultado["tokens_extracao"] = extrair_campos(texto, campos, host, model)
+            campos = campos_do_tipo(grupos, tipo)
+            faltam = {k: v for k, v in campos.items() if k not in achados}
+            via_llm = {}
+            if faltam:  # só carrega o LLM se as regras não acharem algum rótulo (layout diferente ou campo novo)
+                via_llm, resultado["tokens_extracao"] = extrair_campos(texto, faltam, host, model)
+            resultado["campos"] = {k: achados[k] if k in achados else via_llm.get(k) for k in campos}
+            resultado["campos_via_llm"] = list(faltam)
         except Exception as e:  # um PDF com problema não derruba o lote
             resultado["erro"] = f"{type(e).__name__}: {e}"
             print(f"  ERRO: {resultado['erro']}")
@@ -87,9 +110,9 @@ def main():
     campos_arq = Path(os.getenv("ARQUIVO_CAMPOS", Path(__file__).with_name("campos.json")))
     if not entrada.is_dir():
         sys.exit(f"Pasta de entrada não encontrada: {entrada}")
-    campos = json.loads(campos_arq.read_text(encoding="utf-8"))
+    grupos = json.loads(campos_arq.read_text(encoding="utf-8"))
     paginas = [int(p) for p in os.getenv("PAGINAS", "").replace(" ", "").split(",") if p] or None
-    n = processar(entrada, saida, campos, host, model, paginas)
+    n = processar(entrada, saida, grupos, host, model, paginas)
     print(f"Concluído: {n} PDF(s) -> {saida}")
 
 
