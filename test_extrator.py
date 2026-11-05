@@ -9,53 +9,41 @@ import pymupdf
 import extrator
 
 
-def resposta(texto):
-    r = mock.Mock()
-    r.json.return_value = {"response": texto}
-    return r
-
-
 class TestExtrator(unittest.TestCase):
-    def setUp(self):
-        self.tmp = Path(tempfile.mkdtemp())
-        self.entrada, self.saida = self.tmp / "in", self.tmp / "out"
-        self.entrada.mkdir()
-        doc = pymupdf.open()
-        doc.new_page().insert_text((72, 72), "CNPJ 12.345.678/0001-90")
-        doc.save(self.entrada / "a.pdf")
-        (self.entrada / "quebrado.pdf").write_bytes(b"isso nao e pdf")
-
     def test_lote(self):
-        campos = {"cnpj": "CNPJ", "valor": "Valor total"}
-
-        def fake_post(url, json, timeout):
-            if "images" in json:
-                return resposta("text[[48, 244, 114, 259]]\nCNPJ 12.345.678/0001-90")
-            self.assertIn("cnpj", json["format"]["properties"])
-            self.assertNotIn("[[", json["prompt"])
-            return resposta('{"cnpj": "12.345.678/0001-90", "valor": null}')
-
-        with mock.patch.object(extrator.requests, "post", side_effect=fake_post):
-            n = extrator.processar(self.entrada, self.saida, campos, "http://x", "ocr", "ocr")
-
-        self.assertEqual(n, 2)
-        ok = json.loads((self.saida / "a.json").read_text(encoding="utf-8"))
-        self.assertEqual(ok["campos"], {"cnpj": "12.345.678/0001-90", "valor": None})
-        self.assertEqual(ok["paginas"], 1)
-        self.assertIsNone(ok["erro"])
-        ruim = json.loads((self.saida / "quebrado.json").read_text(encoding="utf-8"))
-        self.assertIsNotNone(ruim["erro"])
-
-    def test_paginas_selecionadas(self):
+        tmp = Path(tempfile.mkdtemp())
+        entrada, saida = tmp / "in", tmp / "out"
+        entrada.mkdir()
         doc = pymupdf.open()
-        for i in range(1, 5):
-            doc.new_page().insert_text((72, 72), f"pagina {i}")
-        pdf = self.tmp / "multi.pdf"
-        doc.save(pdf)
-        with mock.patch.object(extrator.requests, "post", return_value=resposta("x")) as post:
-            textos = extrator.ocr_pdf(pdf, "http://x", "ocr", [1, 3, 9])  # 9 não existe
-        self.assertEqual(len(textos), 2)
-        self.assertEqual(post.call_count, 2)
+        for i in range(1, 4):
+            doc.new_page().insert_text((72, 72), f"Pagina {i} - Razao Social: EMPRESA EXEMPLO LTDA - CNPJ: 12.345.678/0001-90")
+        doc.save(entrada / "digital.pdf")
+        doc = pymupdf.open()
+        doc.new_page().insert_text((72, 72), "Pag. 1")  # simula PDF digitalizado: quase sem texto
+        doc.save(entrada / "digitalizado.pdf")
+        (entrada / "quebrado.pdf").write_bytes(b"isso nao e pdf")
+
+        r = mock.Mock()
+        r.json.return_value = {"response": '{"cnpj": "12.345.678/0001-90"}', "prompt_eval_count": 123}
+        with mock.patch.object(extrator.requests, "post", return_value=r) as post:
+            n = extrator.processar(entrada, saida, {"cnpj": "CNPJ"}, "http://x", "gemma3:4b", [1, 3, 9])  # 9 não existe
+
+        self.assertEqual(n, 3)
+        self.assertEqual(post.call_count, 1)  # só o PDF digital chega ao modelo
+        enviado = post.call_args.kwargs["json"]
+        self.assertEqual(enviado["model"], "gemma3:4b")
+        self.assertIn("cnpj", enviado["format"]["properties"])
+        self.assertIn("Pagina 1", enviado["prompt"])
+        self.assertIn("Pagina 3", enviado["prompt"])
+        self.assertNotIn("Pagina 2", enviado["prompt"])
+
+        ler = lambda nome: json.loads((saida / f"{nome}.json").read_text(encoding="utf-8"))
+        ok = ler("digital")
+        self.assertEqual((ok["paginas"], ok["tokens_extracao"], ok["erro"]), (2, 123, None))
+        self.assertEqual(ok["campos"], {"cnpj": "12.345.678/0001-90"})
+        self.assertIn("Pagina 3", ok["markdown"])
+        self.assertIn("sem texto digital", ler("digitalizado")["erro"])
+        self.assertIsNotNone(ler("quebrado")["erro"])
 
 
 if __name__ == "__main__":

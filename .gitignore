@@ -1,0 +1,4 @@
+__pycache__/
+# dados reais de clientes (nomes, CPFs): não versionar
+benchmark/gabarito.json
+benchmark/resultado.json
